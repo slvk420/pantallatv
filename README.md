@@ -16,4 +16,4 @@ Cada cambio en `main` compila el APK. Una vez compilado, abre esto en el navegad
 - Un solo móvil a la vez.
 - Sin sonido en el televisor: se oye en el móvil.
 - El retardo depende de Silk y hay que medirlo.
-- La clave de firma es solo para pruebas. Antes de publicar en una tienda hay que cambiarla.
+- Cada compilación se firma con una clave temporal: para actualizar hay que desinstalar la versión anterior.
