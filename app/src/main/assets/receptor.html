@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PantallaTV</title>
+<style>
+html, body { margin: 0; height: 100%; background: #000; color: #f1f3f8; overflow: hidden;
+  font-family: "Segoe UI", Roboto, "Noto Sans", Arial, sans-serif; font-size: 2.2vw; }
+video { position: fixed; left: 0; top: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+#aviso { position: fixed; left: 0; right: 0; top: 0; bottom: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; padding: 6vw; box-sizing: border-box; background: #11151f; }
+#aviso[hidden], #datos[hidden] { display: none; }
+#aviso b { font-size: 2.2rem; }
+#aviso span { color: #a9b2c7; margin-top: 1rem; max-width: 42rem; }
+#datos { position: fixed; left: 2vw; top: 2vw; padding: .3rem .7rem; background: rgba(0,0,0,.72);
+  font-family: "Roboto Mono", "DejaVu Sans Mono", Consolas, monospace; font-size: .8rem; }
+</style>
+</head>
+<body>
+<video id="video" muted autoplay playsinline></video>
+<div id="aviso"><b id="titulo">Conectando con el móvil…</b><span id="texto">Mantén abierta la app PantallaTV en el móvil.</span></div>
+<div id="datos" hidden></div>
+<script>
+(function () {
+  'use strict';
+  var video = document.getElementById('video');
+  var aviso = document.getElementById('aviso');
+  var titulo = document.getElementById('titulo');
+  var texto = document.getElementById('texto');
+  var datos = document.getElementById('datos');
+  var ws = null, ms = null, sb = null, cola = [], meta = null, codec = '', viendo = false;
+  var cierreDatos = 0, saltos = 0;
+
+  function mostrar(t, d) { titulo.textContent = t; texto.textContent = d || ''; aviso.hidden = false; }
+
+  if (!window.MediaSource || !window.WebSocket) {
+    mostrar('Este navegador no puede recibir el vídeo', 'Le falta MediaSource o WebSocket.');
+    return;
+  }
+
+  function limpiar() {
+    cola = []; sb = null; codec = ''; viendo = false;
+    if (ms) { try { video.removeAttribute('src'); video.load(); } catch (e) {} }
+    ms = null;
+  }
+
+  function abrirVideo() {
+    ms = new MediaSource();
+    video.src = URL.createObjectURL(ms);
+    ms.addEventListener('sourceopen', function () {
+      try {
+        sb = ms.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+        sb.mode = 'segments';
+        sb.addEventListener('updateend', bombear);
+        bombear();
+      } catch (e) {
+        mostrar('Este navegador no admite este vídeo', codec + ': ' + e.message);
+      }
+    });
+  }
+
+  function bombear() {
+    if (!sb || sb.updating || !cola.length) return;
+    var marca = cola[0];
+    if (typeof marca === 'string') {
+      cola.shift();
+      try { if (sb.changeType) sb.changeType('video/mp4; codecs="' + marca + '"'); } catch (e) {}
+      bombear();
+      return;
+    }
+    var total = 0, n = 0;
+    while (n < cola.length && typeof cola[n] !== 'string') { total += cola[n].byteLength; n++; }
+    var unido = new Uint8Array(total), pos = 0;
+    for (var i = 0; i < n; i++) { unido.set(new Uint8Array(cola[i]), pos); pos += cola[i].byteLength; }
+    cola.splice(0, n);
+    try {
+      sb.appendBuffer(unido);
+    } catch (e) {
+      recortar(true);
+    }
+  }
+
+  function recortar(forzar) {
+    if (!sb || sb.updating || !video.buffered.length) return;
+    var hasta = video.currentTime - (forzar ? 1 : 8);
+    if (hasta > video.buffered.start(0) + 1) {
+      try { sb.remove(0, hasta); } catch (e) {}
+    }
+  }
+
+  function conectar() {
+    ws = new WebSocket('ws://' + location.host + '/ws');
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function () {
+      mostrar('Móvil conectado', 'Esperando la primera imagen…');
+    };
+    ws.onmessage = function (ev) {
+      if (typeof ev.data === 'string') {
+        meta = JSON.parse(ev.data);
+        if (!ms) { codec = meta.codec; abrirVideo(); }
+        else if (meta.codec !== codec) { codec = meta.codec; cola.push(codec); }
+        return;
+      }
+      cola.push(ev.data);
+      if (cola.length > 300) { cola = cola.slice(-120); }
+      bombear();
+    };
+    ws.onclose = function () {
+      limpiar();
+      mostrar('Móvil desconectado', 'Abre PantallaTV y pulsa Compartir pantalla. Reintentando…');
+      setTimeout(conectar, 1500);
+    };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+  }
+
+  // Mantiene el vídeo pegado al directo.
+  function perseguir() {
+    if (!video.buffered.length) return;
+    var fin = video.buffered.end(video.buffered.length - 1);
+    var inicio = video.buffered.start(video.buffered.length - 1);
+    var retraso = fin - video.currentTime;
+    if (retraso > 0.5 || video.currentTime < inicio) {
+      video.currentTime = Math.max(inicio, fin - 0.04);
+      saltos++;
+    } else if (retraso > 0.12) {
+      video.playbackRate = 1.3;
+    } else {
+      video.playbackRate = 1;
+    }
+    if (!viendo && video.readyState >= 2) {
+      viendo = true;
+      aviso.hidden = true;
+      enseñarDatos(6000);
+    }
+    if (video.paused) {
+      var p = video.play();
+      if (p && p.catch) p.catch(function () { mostrar('Pulsa OK en el mando', 'El navegador necesita que pulses para empezar.'); });
+    }
+  }
+
+  function enseñarDatos(ms_) {
+    cierreDatos = Date.now() + ms_;
+    datos.hidden = false;
+  }
+
+  function pintarDatos() {
+    if (datos.hidden) return;
+    if (Date.now() > cierreDatos) { datos.hidden = true; return; }
+    var retraso = video.buffered.length ? (video.buffered.end(video.buffered.length - 1) - video.currentTime) : 0;
+    var q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+    datos.textContent = (meta ? meta.ancho + '×' + meta.alto : '') + ' · búfer ' + Math.round(retraso * 1000) + ' ms' +
+      (q ? ' · perdidas ' + q.droppedVideoFrames + '/' + q.totalVideoFrames : '') + ' · saltos ' + saltos;
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.keyCode === 13 || e.keyCode === 23) {
+      enseñarDatos(8000);
+      var p = video.play();
+      if (p && p.catch) p.catch(function () {});
+      if (!aviso.hidden && video.readyState >= 2) aviso.hidden = true;
+      try {
+        var el = document.documentElement;
+        if (!document.fullscreenElement && el.requestFullscreen) el.requestFullscreen();
+      } catch (err) {}
+    }
+  });
+
+  window.__prueba = function () {
+    return { actual: video.currentTime, ancho: video.videoWidth, alto: video.videoHeight, listo: video.readyState,
+      retraso: video.buffered.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : -1,
+      saltos: saltos, pausado: video.paused, error: video.error ? video.error.message : '', aviso: aviso.hidden ? '' : titulo.textContent,
+      calidad: video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().totalVideoFrames : -1 };
+  };
+
+  setInterval(perseguir, 150);
+  setInterval(pintarDatos, 500);
+  setInterval(function () { recortar(false); }, 5000);
+  conectar();
+})();
+</script>
+</body>
+</html>
